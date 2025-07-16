@@ -18,6 +18,36 @@ const WebSocket = require('ws');
 // Load environment variables from .env file
 dotenv.config();
 
+// Enhanced error handling system
+const ERROR_TYPES = {
+  NETWORK: 'network_error',
+  AUTH: 'authentication_error',
+  FILE: 'file_error',
+  VALIDATION: 'validation_error',
+  SKETCH: 'sketch_error',
+  WEBSOCKET: 'websocket_error'
+};
+
+const LOG_LEVELS = {
+  ERROR: 0,
+  WARN: 1,
+  INFO: 2,
+  DEBUG: 3
+};
+
+// Configuration object with validation
+const configSchema = {
+  sketchApiKey: { type: 'string', required: false },
+  port: { type: 'number', min: 1000, max: 65535, default: 3333 },
+  isStdioMode: { type: 'boolean', default: false },
+  localFilePath: { type: 'string', required: false },
+  maxFileSize: { type: 'number', default: 100 * 1024 * 1024 }, // 100MB
+  logLevel: { type: 'string', enum: Object.keys(LOG_LEVELS), default: 'INFO' },
+  healthCheckInterval: { type: 'number', default: 30000 }, // 30 seconds
+  wsReconnectAttempts: { type: 'number', default: 5 },
+  requestTimeout: { type: 'number', default: 30000 }
+};
+
 // Parse command line arguments
 const argv = yargs(hideBin(process.argv))
   .option('sketch-api-key', {
@@ -38,54 +68,274 @@ const argv = yargs(hideBin(process.argv))
     description: 'Path to a local Sketch file to serve',
     type: 'string',
   })
+  .option('max-file-size', {
+    description: 'Maximum file size to process (in MB)',
+    type: 'number',
+    default: 100,
+  })
+  .option('log-level', {
+    description: 'Logging level (ERROR, WARN, INFO, DEBUG)',
+    type: 'string',
+    default: 'INFO',
+  })
   .help()
   .version()
   .alias('help', 'h')
   .argv;
 
-// Configuration variables
-const config = {
+// Configuration variables with validation
+function validateConfig(config) {
+  const errors = [];
+  
+  if (config.port < 1000 || config.port > 65535) {
+    errors.push('Port must be between 1000 and 65535');
+  }
+  
+  if (config.localFilePath && !fs.existsSync(config.localFilePath)) {
+    errors.push(`Local file path does not exist: ${config.localFilePath}`);
+  }
+  
+  if (config.maxFileSize < 1 || config.maxFileSize > 1000) {
+    errors.push('Max file size must be between 1MB and 1000MB');
+  }
+  
+  if (!Object.keys(LOG_LEVELS).includes(config.logLevel.toUpperCase())) {
+    errors.push(`Invalid log level: ${config.logLevel}`);
+  }
+  
+  if (errors.length > 0) {
+    throw new ConfigurationError(errors.join(', '));
+  }
+  
+  return config;
+}
+
+const config = validateConfig({
   sketchApiKey: argv['sketch-api-key'] || process.env.SKETCH_API_KEY,
   port: argv.port || process.env.PORT || 3333,
   isStdioMode: argv.stdio || false,
   localFilePath: argv['local-file'] || process.env.LOCAL_SKETCH_PATH,
-};
+  maxFileSize: (argv['max-file-size'] || 100) * 1024 * 1024, // Convert MB to bytes
+  logLevel: (argv['log-level'] || process.env.LOG_LEVEL || 'INFO').toUpperCase(),
+  healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL) || 30000,
+  wsReconnectAttempts: parseInt(process.env.WS_RECONNECT_ATTEMPTS) || 5,
+  requestTimeout: parseInt(process.env.REQUEST_TIMEOUT) || 30000
+});
+
+// Enhanced logging system
+class Logger {
+  constructor(level = 'INFO') {
+    this.level = LOG_LEVELS[level.toUpperCase()] || LOG_LEVELS.INFO;
+  }
+  
+  log(level, message, metadata = {}) {
+    if (LOG_LEVELS[level] <= this.level) {
+      const timestamp = new Date().toISOString();
+      const logEntry = {
+        timestamp,
+        level,
+        message,
+        ...metadata
+      };
+      console.log(JSON.stringify(logEntry));
+    }
+  }
+  
+  error(message, metadata = {}) {
+    this.log('ERROR', message, metadata);
+  }
+  
+  warn(message, metadata = {}) {
+    this.log('WARN', message, metadata);
+  }
+  
+  info(message, metadata = {}) {
+    this.log('INFO', message, metadata);
+  }
+  
+  debug(message, metadata = {}) {
+    this.log('DEBUG', message, metadata);
+  }
+}
+
+const logger = new Logger(config.logLevel);
+
+// Custom error classes
+class ConfigurationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConfigurationError';
+    this.type = ERROR_TYPES.VALIDATION;
+  }
+}
+
+class NetworkError extends Error {
+  constructor(message, originalError = null) {
+    super(message);
+    this.name = 'NetworkError';
+    this.type = ERROR_TYPES.NETWORK;
+    this.originalError = originalError;
+  }
+}
+
+class AuthenticationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AuthenticationError';
+    this.type = ERROR_TYPES.AUTH;
+  }
+}
+
+class FileError extends Error {
+  constructor(message, filePath = null) {
+    super(message);
+    this.name = 'FileError';
+    this.type = ERROR_TYPES.FILE;
+    this.filePath = filePath;
+  }
+}
+
+class SketchError extends Error {
+  constructor(message, sketchOperation = null) {
+    super(message);
+    this.name = 'SketchError';
+    this.type = ERROR_TYPES.SKETCH;
+    this.sketchOperation = sketchOperation;
+  }
+}
 
 // Initialize Express app
 const app = express();
 const httpServer = createServer(app);
 
-app.use(cors());
-app.use(bodyParser.json());
+// Enhanced CORS configuration
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : true,
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
 
-// WebSocket channels and clients
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+
+// Enhanced WebSocket and connection management
 const channels = new Map();
 const clients = new Set();
 const pendingRequests = new Map();
+const connectionHealth = new Map();
 
-// Initialize WebSocket server
-const wss = new WebSocket.Server({ server: httpServer });
+// Connection health monitoring
+class ConnectionHealthMonitor {
+  constructor() {
+    this.healthChecks = new Map();
+    this.interval = null;
+  }
+  
+  start() {
+    this.interval = setInterval(() => {
+      this.performHealthChecks();
+    }, config.healthCheckInterval);
+    logger.info('Health monitoring started', { interval: config.healthCheckInterval });
+  }
+  
+  stop() {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+      logger.info('Health monitoring stopped');
+    }
+  }
+  
+  performHealthChecks() {
+    const now = Date.now();
+    for (const [ws, lastSeen] of this.healthChecks.entries()) {
+      if (now - lastSeen > config.healthCheckInterval * 2) {
+        logger.warn('WebSocket client failed health check', { 
+          lastSeen: new Date(lastSeen).toISOString() 
+        });
+        this.removeUnhealthyClient(ws);
+      } else {
+        // Send ping to check if client is still responsive
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        }
+      }
+    }
+  }
+  
+  updateClientHealth(ws) {
+    this.healthChecks.set(ws, Date.now());
+  }
+  
+  removeUnhealthyClient(ws) {
+    this.healthChecks.delete(ws);
+    clients.delete(ws);
+    
+    // Remove from all channels
+    for (const [channelName, channelClients] of channels.entries()) {
+      if (channelClients.has(ws)) {
+        channelClients.delete(ws);
+        if (channelClients.size === 0) {
+          channels.delete(channelName);
+          logger.info('Removed empty channel', { channel: channelName });
+        }
+      }
+    }
+  }
+}
 
-wss.on('connection', (ws) => {
-  console.log('WebSocket client connected');
+const healthMonitor = new ConnectionHealthMonitor();
+
+// Initialize WebSocket server with enhanced error handling
+const wss = new WebSocket.Server({ 
+  server: httpServer,
+  perMessageDeflate: false,
+  maxPayload: config.maxFileSize
+});
+
+wss.on('connection', (ws, req) => {
+  const clientId = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
+  logger.info('WebSocket client connected', { clientId });
+  
   clients.add(ws);
-
+  healthMonitor.updateClientHealth(ws);
+  
+  // Enhanced message handling with validation
   ws.on('message', (message) => {
     try {
+      healthMonitor.updateClientHealth(ws);
+      
+      if (message.length > config.maxFileSize) {
+        throw new Error('Message too large');
+      }
+      
       const data = JSON.parse(message);
       handleWebSocketMessage(ws, data);
     } catch (error) {
-      console.error('Error processing WebSocket message:', error);
-      ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Invalid message format'
-      }));
+      logger.error('Error processing WebSocket message', { 
+        error: error.message, 
+        clientId,
+        messageLength: message.length 
+      });
+      
+      const errorResponse = createErrorResponse(ERROR_TYPES.WEBSOCKET, error.message, {
+        suggestion: 'Check message format and size limits'
+      });
+      
+      sendSafeWebSocketMessage(ws, errorResponse);
     }
   });
 
-  ws.on('close', () => {
-    console.log('WebSocket client disconnected');
+  ws.on('close', (code, reason) => {
+    logger.info('WebSocket client disconnected', { 
+      clientId, 
+      code, 
+      reason: reason.toString() 
+    });
+    
     clients.delete(ws);
+    healthMonitor.healthChecks.delete(ws);
     
     // Remove client from all channels
     for (const [channelName, channelClients] of channels.entries()) {
@@ -93,17 +343,62 @@ wss.on('connection', (ws) => {
         channelClients.delete(ws);
         if (channelClients.size === 0) {
           channels.delete(channelName);
+          logger.info('Removed empty channel', { channel: channelName });
         }
       }
     }
   });
 
-  // Send initial connection confirmation
-  ws.send(JSON.stringify({
+  ws.on('error', (error) => {
+    logger.error('WebSocket error', { clientId, error: error.message });
+    healthMonitor.removeUnhealthyClient(ws);
+  });
+
+  ws.on('pong', () => {
+    healthMonitor.updateClientHealth(ws);
+  });
+
+  // Send initial connection confirmation with server info
+  const welcomeMessage = {
     type: 'connected',
-    message: 'Connected to Sketch MCP server'
-  }));
+    message: 'Connected to Sketch MCP server',
+    serverInfo: {
+      version: require('./package.json').version,
+      capabilities: ['file_processing', 'component_listing', 'real_time_updates'],
+      maxFileSize: config.maxFileSize,
+      healthCheckInterval: config.healthCheckInterval
+    }
+  };
+  
+  sendSafeWebSocketMessage(ws, welcomeMessage);
 });
+
+// Safe WebSocket message sending with error handling
+function sendSafeWebSocketMessage(ws, message) {
+  try {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+      return true;
+    } else {
+      logger.warn('Attempted to send message to closed WebSocket');
+      return false;
+    }
+  } catch (error) {
+    logger.error('Failed to send WebSocket message', { error: error.message });
+    return false;
+  }
+}
+
+// Enhanced error response creation
+function createErrorResponse(type, message, metadata = {}) {
+  return {
+    type: 'error',
+    errorType: type,
+    message,
+    timestamp: new Date().toISOString(),
+    ...metadata
+  };
+}
 
 // Handle WebSocket messages
 function handleWebSocketMessage(ws, data) {
@@ -431,44 +726,205 @@ async function forwardToWebSocketClients(command, params) {
   });
 }
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  const health = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    connections: {
+      websocket: clients.size,
+      channels: channels.size,
+      pending: pendingRequests.size
+    },
+    config: {
+      port: config.port,
+      maxFileSize: config.maxFileSize,
+      logLevel: config.logLevel,
+      hasApiKey: !!config.sketchApiKey,
+      hasLocalFile: !!config.localFilePath
+    }
+  };
+  
+  res.json(health);
+});
+
+// Validation endpoint for configuration
+app.get('/validate', (req, res) => {
+  const validationResults = {
+    timestamp: new Date().toISOString(),
+    configuration: {
+      port: { valid: true, value: config.port },
+      maxFileSize: { valid: true, value: `${config.maxFileSize / 1024 / 1024}MB` },
+      logLevel: { valid: true, value: config.logLevel }
+    },
+    connectivity: {
+      websocket: clients.size > 0,
+      channels: channels.size > 0
+    },
+    requirements: {
+      sketchApiKey: {
+        present: !!config.sketchApiKey,
+        required: 'Optional for local files, required for Sketch Cloud'
+      },
+      localFile: {
+        present: !!config.localFilePath,
+        valid: config.localFilePath ? fs.existsSync(config.localFilePath) : null,
+        path: config.localFilePath
+      }
+    }
+  };
+  
+  // Add warnings if any
+  const warnings = [];
+  if (!config.sketchApiKey && !config.localFilePath) {
+    warnings.push('No Sketch API key or local file configured');
+  }
+  if (clients.size === 0) {
+    warnings.push('No WebSocket clients connected');
+  }
+  
+  if (warnings.length > 0) {
+    validationResults.warnings = warnings;
+  }
+  
+  res.json(validationResults);
+});
+
 // Main endpoint for basic info
 app.get('/', (req, res) => {
+  const stats = {
+    connections: clients.size,
+    channels: channels.size,
+    uptime: Math.floor(process.uptime()),
+    memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
+  };
+
   res.send(`
     <h1>Sketch MCP Server</h1>
-    <p>Server is running!</p>
-    <p>SSE endpoint available at <a href="/sse">http://localhost:${config.port}/sse</a></p>
-    <p>Message endpoint available at http://localhost:${config.port}/messages</p>
-    <p>WebSocket endpoint available at ws://localhost:${config.port}</p>
+    <p><strong>Status:</strong> Running</p>
+    <p><strong>Version:</strong> ${require('./package.json').version}</p>
+    <div style="margin: 20px 0; padding: 15px; background: #f5f5f5; border-radius: 5px;">
+      <h3>Server Statistics</h3>
+      <ul>
+        <li>Active WebSocket connections: ${stats.connections}</li>
+        <li>Active channels: ${stats.channels}</li>
+        <li>Uptime: ${stats.uptime} seconds</li>
+        <li>Memory usage: ${stats.memory}</li>
+      </ul>
+    </div>
+    <div style="margin: 20px 0;">
+      <h3>Available Endpoints</h3>
+      <ul>
+        <li><a href="/health">Health Check</a> - Server health status</li>
+        <li><a href="/validate">Configuration Validation</a> - Check server setup</li>
+        <li><a href="/sse">Server-Sent Events</a> - For Cursor IDE integration</li>
+        <li>POST /messages - Message endpoint for MCP tools</li>
+        <li>WebSocket: ws://localhost:${config.port} - For Sketch plugin</li>
+      </ul>
+    </div>
+    <div style="margin: 20px 0; padding: 15px; background: #e8f4fd; border-radius: 5px;">
+      <h3>Setup Instructions</h3>
+      <p><strong>For Cursor IDE:</strong> Add MCP server with URL: <code>http://localhost:${config.port}/sse</code></p>
+      <p><strong>For Sketch Plugin:</strong> Connect to port <code>${config.port}</code></p>
+    </div>
   `);
 });
 
-// Function to get Sketch file contents
+// Enhanced file processing with validation and error handling
 async function getSketchFile(url, nodeId) {
-  // Add support for both local and cloud files
-  const isCloudUrl = url.includes('sketch.cloud');
-  let documentData;
-  
-  if (isCloudUrl) {
-    const documentId = extractDocumentIdFromUrl(url);
-    if (!config.sketchApiKey) {
-      throw new Error('Sketch API key is required for cloud files');
+  try {
+    logger.debug('Processing Sketch file request', { url, nodeId });
+    
+    // Validate input parameters
+    if (!url || typeof url !== 'string') {
+      throw new FileError('URL parameter is required and must be a string');
     }
-    documentData = await fetchCloudDocument(documentId);
-  } else {
-    documentData = await parseLocalSketchFile(url);
-  }
-
-  // Add better node traversal and selection support
-  if (nodeId) {
-    const node = findNodeWithMetadata(documentData, nodeId);
-    if (!node) {
-      throw new Error(`Node ${nodeId} not found`);
+    
+    // Determine file source and validate
+    const isCloudUrl = url.includes('sketch.cloud') || url.includes('sketch.com');
+    const isLocalFile = !isCloudUrl && (url.startsWith('/') || url.includes(':\\'));
+    
+    if (!isCloudUrl && !isLocalFile && !config.localFilePath) {
+      throw new FileError('Invalid URL format. Must be a Sketch Cloud URL or local file path', url);
     }
-    // Include parent context and styling information
-    return enrichNodeData(node);
+    
+    let documentData;
+    let fileSize = 0;
+    
+    if (isCloudUrl) {
+      if (!config.sketchApiKey) {
+        throw new AuthenticationError('Sketch API key is required for cloud files. Use --sketch-api-key parameter or set SKETCH_API_KEY environment variable');
+      }
+      
+      const documentId = extractDocumentIdFromUrl(url);
+      if (!documentId) {
+        throw new FileError('Invalid Sketch Cloud URL format', url);
+      }
+      
+      documentData = await fetchCloudDocument(documentId);
+    } else {
+      const filePath = isLocalFile ? url : config.localFilePath;
+      
+      if (!filePath) {
+        throw new FileError('No local file specified. Use --local-file parameter or provide a file path');
+      }
+      
+      // Check file existence and size
+      if (!fs.existsSync(filePath)) {
+        throw new FileError(`File not found: ${filePath}`, filePath);
+      }
+      
+      const stats = fs.statSync(filePath);
+      fileSize = stats.size;
+      
+      if (fileSize > config.maxFileSize) {
+        throw new FileError(`File too large: ${Math.round(fileSize / 1024 / 1024)}MB (max: ${Math.round(config.maxFileSize / 1024 / 1024)}MB)`, filePath);
+      }
+      
+      if (fileSize === 0) {
+        throw new FileError('File is empty', filePath);
+      }
+      
+      documentData = await parseLocalSketchFile(filePath);
+    }
+    
+    // Log successful file processing
+    logger.info('File processed successfully', { 
+      url: isCloudUrl ? 'cloud' : 'local',
+      fileSize: Math.round(fileSize / 1024),
+      hasNodeId: !!nodeId 
+    });
+    
+    // Handle specific node requests
+    if (nodeId) {
+      const node = findNodeWithMetadata(documentData, nodeId);
+      if (!node) {
+        throw new SketchError(`Node with ID '${nodeId}' not found in document`, 'node_lookup');
+      }
+      
+      logger.debug('Node found successfully', { nodeId, nodeType: node._class });
+      return enrichNodeData(node);
+    }
+    
+    return documentData;
+    
+  } catch (error) {
+    logger.error('Failed to process Sketch file', { 
+      url, 
+      nodeId, 
+      error: error.message,
+      errorType: error.type || 'unknown'
+    });
+    
+    // Re-throw with appropriate error type if not already categorized
+    if (error instanceof FileError || error instanceof AuthenticationError || error instanceof SketchError) {
+      throw error;
+    } else {
+      throw new FileError(`Failed to process Sketch file: ${error.message}`, url);
+    }
   }
-
-  return documentData;
 }
 
 // Function to fetch document from Sketch Cloud
@@ -825,19 +1281,117 @@ async function getSketchSelection(url, selectionIds) {
   }
 }
 
-httpServer.listen(config.port, () => {
-  console.log(`
-Sketch Context MCP Server is running on port ${config.port}
-HTTP endpoints:
-- http://localhost:${config.port} (Info page)
-- http://localhost:${config.port}/sse (Server-sent events for Cursor)
-- http://localhost:${config.port}/messages (Message endpoint for tools)
-WebSocket endpoint:
-- ws://localhost:${config.port} (For Sketch plugin connections)
-
-To configure Cursor to use this server:
-1. Open Cursor and go to Settings > Features > Context
-2. Add an MCP server with the URL: http://localhost:${config.port}/sse
-3. Connect the Sketch plugin to this server on port ${config.port}
-  `);
+// Graceful shutdown handling
+process.on('SIGTERM', () => {
+  logger.info('Received SIGTERM, shutting down gracefully');
+  shutdown();
 });
+
+process.on('SIGINT', () => {
+  logger.info('Received SIGINT, shutting down gracefully');
+  shutdown();
+});
+
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception', { error: error.message, stack: error.stack });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled rejection', { reason, promise });
+});
+
+function shutdown() {
+  logger.info('Starting graceful shutdown');
+  
+  // Stop health monitoring
+  healthMonitor.stop();
+  
+  // Close all WebSocket connections
+  clients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(1000, 'Server shutting down');
+    }
+  });
+  
+  // Close HTTP server
+  httpServer.close(() => {
+    logger.info('HTTP server closed');
+    process.exit(0);
+  });
+  
+  // Force exit after 5 seconds
+  setTimeout(() => {
+    logger.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 5000);
+}
+
+// Start the server
+try {
+  httpServer.listen(config.port, () => {
+    // Start health monitoring
+    healthMonitor.start();
+    
+    const serverInfo = {
+      version: require('./package.json').version,
+      port: config.port,
+      logLevel: config.logLevel,
+      maxFileSize: `${Math.round(config.maxFileSize / 1024 / 1024)}MB`,
+      hasApiKey: !!config.sketchApiKey,
+      hasLocalFile: !!config.localFilePath,
+      endpoints: {
+        info: `http://localhost:${config.port}`,
+        health: `http://localhost:${config.port}/health`,
+        validate: `http://localhost:${config.port}/validate`,
+        sse: `http://localhost:${config.port}/sse`,
+        messages: `http://localhost:${config.port}/messages`,
+        websocket: `ws://localhost:${config.port}`
+      }
+    };
+    
+    logger.info('Sketch Context MCP Server started successfully', serverInfo);
+    
+    // Display startup information
+    console.log(`
+┌─────────────────────────────────────────────────────────────────┐
+│  Sketch Context MCP Server v${require('./package.json').version}                           │
+├─────────────────────────────────────────────────────────────────┤
+│  Status: Running on port ${config.port}                                   │
+│  Log Level: ${config.logLevel}                                              │
+│  Max File Size: ${Math.round(config.maxFileSize / 1024 / 1024)}MB                                      │
+│  API Key: ${config.sketchApiKey ? '✓ Configured' : '✗ Not set'}                             │
+│  Local File: ${config.localFilePath ? '✓ Configured' : '✗ Not set'}                           │
+├─────────────────────────────────────────────────────────────────┤
+│  Quick Links:                                                   │
+│  • Server Info:   http://localhost:${config.port}                        │
+│  • Health Check:  http://localhost:${config.port}/health                 │
+│  • Validation:    http://localhost:${config.port}/validate               │
+├─────────────────────────────────────────────────────────────────┤
+│  Integration:                                                   │
+│  • Cursor MCP:    http://localhost:${config.port}/sse                    │
+│  • Sketch Plugin: ws://localhost:${config.port}                          │
+└─────────────────────────────────────────────────────────────────┘
+
+Setup Instructions:
+1. For Cursor IDE: Add MCP server with URL http://localhost:${config.port}/sse
+2. For Sketch Plugin: Connect to port ${config.port}
+3. Visit http://localhost:${config.port}/validate to check your configuration
+
+Press Ctrl+C to stop the server.
+    `);
+  });
+  
+  httpServer.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      logger.error(`Port ${config.port} is already in use. Please choose a different port.`);
+    } else {
+      logger.error('Server error', { error: error.message });
+    }
+    process.exit(1);
+  });
+  
+} catch (error) {
+  logger.error('Failed to start server', { error: error.message });
+  process.exit(1);
+}
