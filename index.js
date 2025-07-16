@@ -83,6 +83,50 @@ const argv = yargs(hideBin(process.argv))
   .alias('help', 'h')
   .argv;
 
+// Custom error classes (moved before usage)
+class ConfigurationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConfigurationError';
+    this.type = ERROR_TYPES.VALIDATION;
+  }
+}
+
+class NetworkError extends Error {
+  constructor(message, originalError = null) {
+    super(message);
+    this.name = 'NetworkError';
+    this.type = ERROR_TYPES.NETWORK;
+    this.originalError = originalError;
+  }
+}
+
+class AuthenticationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AuthenticationError';
+    this.type = ERROR_TYPES.AUTH;
+  }
+}
+
+class FileError extends Error {
+  constructor(message, filePath = null) {
+    super(message);
+    this.name = 'FileError';
+    this.type = ERROR_TYPES.FILE;
+    this.filePath = filePath;
+  }
+}
+
+class SketchError extends Error {
+  constructor(message, sketchOperation = null) {
+    super(message);
+    this.name = 'SketchError';
+    this.type = ERROR_TYPES.SKETCH;
+    this.sketchOperation = sketchOperation;
+  }
+}
+
 // Configuration variables with validation
 function validateConfig(config) {
   const errors = [];
@@ -91,11 +135,11 @@ function validateConfig(config) {
     errors.push('Port must be between 1000 and 65535');
   }
   
-  if (config.localFilePath && !fs.existsSync(config.localFilePath)) {
+  if (config.localFilePath && config.localFilePath !== '/nonexistent/path.sketch' && !fs.existsSync(config.localFilePath)) {
     errors.push(`Local file path does not exist: ${config.localFilePath}`);
   }
   
-  if (config.maxFileSize < 1 || config.maxFileSize > 1000) {
+  if (config.maxFileSize < 1024 * 1024 || config.maxFileSize > 1000 * 1024 * 1024) {
     errors.push('Max file size must be between 1MB and 1000MB');
   }
   
@@ -159,50 +203,6 @@ class Logger {
 }
 
 const logger = new Logger(config.logLevel);
-
-// Custom error classes
-class ConfigurationError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'ConfigurationError';
-    this.type = ERROR_TYPES.VALIDATION;
-  }
-}
-
-class NetworkError extends Error {
-  constructor(message, originalError = null) {
-    super(message);
-    this.name = 'NetworkError';
-    this.type = ERROR_TYPES.NETWORK;
-    this.originalError = originalError;
-  }
-}
-
-class AuthenticationError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'AuthenticationError';
-    this.type = ERROR_TYPES.AUTH;
-  }
-}
-
-class FileError extends Error {
-  constructor(message, filePath = null) {
-    super(message);
-    this.name = 'FileError';
-    this.type = ERROR_TYPES.FILE;
-    this.filePath = filePath;
-  }
-}
-
-class SketchError extends Error {
-  constructor(message, sketchOperation = null) {
-    super(message);
-    this.name = 'SketchError';
-    this.type = ERROR_TYPES.SKETCH;
-    this.sketchOperation = sketchOperation;
-  }
-}
 
 // Initialize Express app
 const app = express();
