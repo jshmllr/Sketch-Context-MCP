@@ -113,7 +113,15 @@ function createPanel(options, context) {
 function WebViewMessageHandler() {}
 WebViewMessageHandler.prototype.userContentController_didReceiveScriptMessage = function(controller, message) {
   try {
-    var data = JSON.parse(message.body());
+    var data = message.body();
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch (parseError) {
+        log("Error parsing message JSON: " + parseError);
+        return;
+      }
+    }
     var type = data.type;
     
     switch (type) {
