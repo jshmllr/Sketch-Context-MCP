@@ -17,8 +17,8 @@ This guide consolidates non-negotiable interface rules for Sketch Context MCP an
 - Keep examples concise. Prefer fenced code blocks for multi-line snippets and inline code for attributes or tags.
 - Validate links quarterly; prefer canonical sources (WAI-ARIA APG, MDN, official vendor docs).
 - Record every change in the changelog and update the “Last Reviewed” metadata.
-
-> **Last Reviewed:** 2024-05-26
+ 
+> **Last Reviewed:** 2025-09-29
 
 ## Quick Reference Overview
 
@@ -174,4 +174,4 @@ This guide consolidates non-negotiable interface rules for Sketch Context MCP an
 
 | Date       | Change Description                    | Author |
 |------------|----------------------------------------|--------|
-| 2024-05-26 | Initial consolidation and restructuring | Agent  |
+| 2025-09-29 | Initial consolidation and restructuring | Agent  |
