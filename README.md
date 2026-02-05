@@ -55,6 +55,10 @@ These tools enable Cursor to:
 - Listing all components in a Sketch file
 - Creating rectangles, text and other elements via commands from Cursor
 
+## UI & Experience Principles
+
+Review the [Accessible, Fast, Delightful UI Principles](docs/ui-principles.md) before shipping changes to the plugin or MCP UI. The guide enumerates the MUST/SHOULD/NEVER rules for interaction patterns, accessibility, performance, and visual design to keep user experiences inclusive and resilient.
+
 ## Getting Started
 
 ### Prerequisites
