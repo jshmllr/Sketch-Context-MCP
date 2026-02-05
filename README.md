@@ -1,4 +1,7 @@
-> **Note:** This project is currently in testing phase and may not be fully stable.
+> [!NOTE]
+> This repository has been archived as of February 5, 2026. Please refer to the official Sketch MCP at [https://www.sketch.com/docs/mcp-server/](https://www.sketch.com/docs/mcp-server/)
+
+> **Note:** This project was currently in dev/testing phase and was not fully stable.
 
 # Sketch Context MCP
 
